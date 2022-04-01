@@ -244,10 +244,7 @@ export default class DatePickerFoundation extends BaseFoundation<DatePickerAdapt
         this._adapter.updatePrevTimezone(prevTimeZone);
         this._adapter.updateInputValue(null);
         this._adapter.updateValue(result);
-
-        if (this._adapter.needConfirm()) {
-            this._adapter.updateCachedSelectedValue(result);
-        }
+        this.resetCachedSelectedValue(result);
     }
 
     parseWithTimezone(value: ValueType, timeZone: string | number, prevTimeZone: string | number) {
@@ -426,6 +423,7 @@ export default class DatePickerFoundation extends BaseFoundation<DatePickerAdapt
     handleInputChange(input: string, e: any) {
         const result = this._isMultiple() ? this.parseMultipleInput(input) : this.parseInput(input);
         const { value: stateValue } = this.getStates();
+        this._updateCachedSelectedValueFromInput(input);
         // Enter a valid date or empty
         if ((result && result.length) || input === '') {
             // If you click the clear button
@@ -437,9 +435,6 @@ export default class DatePickerFoundation extends BaseFoundation<DatePickerAdapt
             // Updates the selected value when entering a valid date
             const changedDates = this._getChangedDates(result);
             if (!this._someDateDisabled(changedDates)) {
-                if (this._adapter.needConfirm()) {
-                    this._adapter.updateCachedSelectedValue(result);
-                }
                 if (!isEqual(result, stateValue)) {
                     this._notifyChange(result);
                 }
@@ -460,15 +455,13 @@ export default class DatePickerFoundation extends BaseFoundation<DatePickerAdapt
         const _isMultiple = this._isMultiple();
         const result = _isMultiple ? this.parseMultipleInput(insetInputStr, format) : this.parseInput(insetInputStr, format);
         const { value: stateValue } = this.getStates();
+        this._updateCachedSelectedValueFromInput(insetInputStr);
 
         if ((result && result.length)) {
             const changedDates = this._getChangedDates(result);
             if (!this._someDateDisabled(changedDates)) {
-                if (this._adapter.needConfirm()) {
-                    this._adapter.updateCachedSelectedValue(result);
-                }
                 if (!isEqual(result, stateValue)) {
-                    if (!this._isControlledComponent()) {
+                    if (!this._isControlledComponent() && !this._adapter.needConfirm()) {
                         this._adapter.updateValue(result);
                     }
                     this._notifyChange(result);
@@ -478,6 +471,17 @@ export default class DatePickerFoundation extends BaseFoundation<DatePickerAdapt
             }
         }
         this._adapter.updateInsetInputValue(insetInputValue);
+    }
+
+    /**
+     * when input change we reset cached selected value
+     */
+    _updateCachedSelectedValueFromInput(input: string) {
+        const looseResult = this.getLooseDateFromInput(input);
+        const changedLooseResult = this._getChangedDates(looseResult);
+        if (!this._someDateDisabled(changedLooseResult)) {
+            this.resetCachedSelectedValue(looseResult);
+        }
     }
 
     /**
@@ -503,6 +507,11 @@ export default class DatePickerFoundation extends BaseFoundation<DatePickerAdapt
             this._updateValueAndInput('' as any, true, '');
         } else {
             this._updateValueAndInput(stateValue);
+        }
+
+        // when need confirm or range type is `true`, we reset cached value after closing panel
+        if (!this._adapter.needConfirm() && !this._isRangeType()) {
+            this.resetCachedSelectedValue(stateValue);
         }
     }
 
@@ -551,9 +560,7 @@ export default class DatePickerFoundation extends BaseFoundation<DatePickerAdapt
         const inputValue = '';
         if (!this._isControlledComponent('value')) {
             this._updateValueAndInput(value, true, inputValue);
-            if (this._adapter.needConfirm()) {
-                this._adapter.updateCachedSelectedValue(value);
-            }
+            this.resetCachedSelectedValue(value);
         }
         this._notifyChange(value);
         this._adapter.notifyClear(e);
@@ -640,6 +647,114 @@ export default class DatePickerFoundation extends BaseFoundation<DatePickerAdapt
                     break;
                 default:
                     break;
+            }
+        }
+
+        return result;
+    }
+
+    /**
+     * get date which may include null from input
+     */
+    getLooseDateFromInput(input: string): Array<Date | null> {
+        const value = this._isMultiple() ? this.parseMultipleInputLoose(input) : this.parseInputLoose(input);
+        return value;
+    }
+
+    /**
+     * parse input into `Array<Date|null>`, loose means return value includes `null`
+     * 
+     * @example
+     * ```javascript
+     * parseInputLoose('2022-03-15 ~ '); // [Date, null]
+     * parseInputLoose(' ~ 2022-03-15 '); // [null, Date]
+     * parseInputLoose(''); // []
+     * ```
+     */
+    parseInputLoose(input = ''): Array<Date | null> {
+        let result: Array<Date | null> = [];
+        const { dateFnsLocale, rangeSeparator, type, format } = this.getProps();
+
+        if (input && input.length) {
+            const formatToken = format || getDefaultFormatTokenByType(type);
+            let parsedResult, formatedInput;
+            const nowDate = new Date();
+            switch (type) {
+                case 'date':
+                case 'dateTime':
+                case 'month':
+                    const _parsedResult = compatiableParse(input, formatToken, nowDate, dateFnsLocale);
+                    if (isValidDate(_parsedResult)) {
+                        formatedInput = this.localeFormat(_parsedResult as Date, formatToken);
+                        if (formatedInput === input) {
+                            parsedResult = _parsedResult;
+                        }
+                    } else {
+                        parsedResult = null;
+                    }
+                    result = [parsedResult];
+                    break;
+                case 'dateRange':
+                case 'dateTimeRange':
+                    const separator = rangeSeparator;
+                    const values = input.split(separator);
+                    parsedResult =
+                        values &&
+                        values.reduce((arr, cur) => {
+                            let parsedVal = null;
+                            const _parsedResult = compatiableParse(cur, formatToken, nowDate, dateFnsLocale);
+                            if (isValidDate(_parsedResult)) {
+                                formatedInput = this.localeFormat(_parsedResult as Date, formatToken);
+                                if (formatedInput === cur) {
+                                    parsedVal = _parsedResult;
+                                }
+                            }
+                            arr.push(parsedVal);
+                            return arr;
+                        }, []);
+                    if (Array.isArray(parsedResult) && parsedResult.every(item => isValid(item))) {
+                        parsedResult.sort((d1, d2) => d1.getTime() - d2.getTime());
+                    }
+                    result = parsedResult;
+                    break;
+                default:
+                    break;
+            }
+        }
+
+        return result;
+    }
+
+    /**
+     * parse multiple into `Array<Date|null>`, loose means return value includes `null`
+     * 
+     * @example
+     * ```javascript
+     * parseMultipleInputLoose('2021-01-01,2021-10-15'); // [Date, Date];
+     * parseMultipleInputLoose('2021-01-01,2021-10-'); // [Date, null];
+     * parseMultipleInputLoose(''); // [];
+     * ```
+     */
+    parseMultipleInputLoose(input = '', separator: string = strings.DEFAULT_SEPARATOR_MULTIPLE, needDedupe = false) {
+        const max = this.getProp('max');
+        const inputArr = input.split(separator);
+        const result: Date[] = [];
+
+        for (const curInput of inputArr) {
+            let tmpParsed = curInput && this.parseInputLoose(curInput);
+            tmpParsed = Array.isArray(tmpParsed) ? tmpParsed : tmpParsed && [tmpParsed];
+            if (tmpParsed && tmpParsed.length) {
+                if (needDedupe) {
+                    !result.filter(r => Boolean(tmpParsed.find(tp => isSameSecond(r, tp)))) && result.push(...tmpParsed);
+                } else {
+                    result.push(...tmpParsed);
+                }
+            } else {
+                return [];
+            }
+
+            if (max && max > 0 && result.length > max) {
+                return [];
             }
         }
 
@@ -799,15 +914,12 @@ export default class DatePickerFoundation extends BaseFoundation<DatePickerAdapt
          */
         const needCheckFocusRecord = get(options, 'needCheckFocusRecord', true);
 
-        if (this._adapter.needConfirm()) {
-            this._adapter.updateCachedSelectedValue(value);
-        }
-
         const dates = Array.isArray(value) ? [...value] : value ? [value] : [];
         const changedDates = this._getChangedDates(dates);
 
         let inputValue, insetInputValue;
         if (!this._someDateDisabled(changedDates)) {
+            this.resetCachedSelectedValue(dates);
             inputValue = this._isMultiple() ? this.formatMultipleDates(dates) : this.formatDates(dates);
             if (insetInput) {
                 const insetInputFormatToken = getInsetInputFormatToken({ format, type });
